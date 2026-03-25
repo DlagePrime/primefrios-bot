@@ -1,0 +1,12 @@
+STDOUT:
+🔄 Sincronizando pedidos das últimas 36 horas...
+⏱️ Início da sincronização: 2026-03-24 22:16:03
+🪟 Janela de referência: 2026-03-23 10:16:03 até 2026-03-24 22:16:03
+📄 Total de páginas no Omie: 44
+📖 Páginas efetivamente lidas: 3
+📦 Pedidos lidos: 253
+🎯 Pedidos na janela encontrados: 27
+✅ Pedidos sincronizados: 27
+
+
+STDERR:

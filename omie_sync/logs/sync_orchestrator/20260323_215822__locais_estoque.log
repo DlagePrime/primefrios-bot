@@ -1,0 +1,19 @@
+[START] 2026-03-23T21:58:23
+[MODULE] locais_estoque
+[LABEL] Locais de Estoque
+[FILE] sync_locais_estoque.py
+[COMMAND] /opt/omie_sync/venv/bin/python3 /opt/omie_sync/app/sync/sync_locais_estoque.py
+==========================================================================================
+
+
+[STDERR]
+Traceback (most recent call last):
+  File "/opt/omie_sync/app/sync/sync_locais_estoque.py", line 6, in <module>
+    from app.db.connection import get_connection
+ModuleNotFoundError: No module named 'app.db'
+
+==========================================================================================
+[END] 2026-03-23T21:58:23
+[STATUS] error
+[RETURN_CODE] 1
+[DURATION_SECONDS] 0.1483
