@@ -108,6 +108,50 @@ def normalizar_texto(texto: str) -> str:
     )
 
 
+def to_decimal(value: Any, default: str = "0") -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    if value in (None, "", "-"):
+        return Decimal(default)
+
+    texto = str(value).strip().replace("R$", "").replace(" ", "")
+    texto = texto.replace(".", "").replace(",", ".") if "," in texto else texto
+
+    try:
+        return Decimal(texto)
+    except Exception:
+        return Decimal(default)
+
+
+def to_int_or_none(value: Any) -> Optional[int]:
+    if value in (None, "", "-"):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(str(value).replace(",", ".")))
+        except Exception:
+            return None
+
+
+def to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "verdadeiro", "sim", "yes")
+
+
+def parse_date_or_today(value: Any) -> date:
+    if not value:
+        return date.today()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except Exception:
+        return date.today()
+
+
 def classificar_cenario_fiscal(uf_cliente: str, tipo_pedido: str) -> Dict[str, str]:
     uf = (uf_cliente or "").upper().strip()
     tipo = (tipo_pedido or "venda").lower().strip()
@@ -326,6 +370,29 @@ def buscar_produto_por_texto(cur, texto_produto: str) -> Optional[Dict[str, Any]
     return None
 
 
+def buscar_produto_por_codigo(cur, codigo_produto_omie: int) -> Optional[Dict[str, Any]]:
+    cur.execute("""
+        select
+            codigo_produto_omie,
+            descricao,
+            unidade,
+            codigo_produto_integracao
+        from omie_core.produtos
+        where codigo_produto_omie = %s
+        limit 1
+    """, (codigo_produto_omie,))
+    row = cur.fetchone()
+    if not row:
+        return None
+
+    return {
+        "codigo_produto_omie": row[0],
+        "descricao": row[1],
+        "unidade": row[2],
+        "codigo_produto_integracao": row[3],
+    }
+
+
 def converter_quantidade(chave_produto: str, quantidade: Any, unidade: str) -> Decimal:
     qtd = Decimal(str(quantidade or 0))
     und = (unidade or "UN").upper().strip()
@@ -377,12 +444,22 @@ def compor_pedido(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         pedido_extraido = payload.get("pedido_extraido") or {}
-        itens_entrada = pedido_extraido.get("itens") or []
+        payload_envio_omie = payload.get("payload_envio_omie") or {}
+
+        modo_payload_pronto = bool(payload_envio_omie)
+
+        if modo_payload_pronto:
+            pedido_pronto = payload_envio_omie.get("pedido") or {}
+            itens_entrada = payload_envio_omie.get("itens") or []
+            codigo_cliente_omie = pedido_pronto.get("codigo_cliente_omie")
+        else:
+            pedido_pronto = {}
+            itens_entrada = pedido_extraido.get("itens") or []
+            codigo_cliente_omie = pedido_extraido.get("codigo_cliente_omie")
 
         if not itens_entrada:
             raise Exception("Nenhum item foi informado para compor o pedido.")
 
-        codigo_cliente_omie = pedido_extraido.get("codigo_cliente_omie")
         remotejid = payload.get("remotejid") or ""
         whatsapp_numero = "".join(ch for ch in str(remotejid) if ch.isdigit())
 
@@ -400,88 +477,182 @@ def compor_pedido(payload: Dict[str, Any]) -> Dict[str, Any]:
         cidade_cliente_snapshot = cliente["endereco_cidade"]
         uf_cliente_snapshot = cliente["endereco_uf"]
 
-        codigo_vendedor_omie = cliente["codigo_vendedor_padrao_omie"]
+        if modo_payload_pronto:
+            codigo_vendedor_omie = to_int_or_none(pedido_pronto.get("codigo_vendedor_omie")) or cliente["codigo_vendedor_padrao_omie"]
+            codigo_condicao_pagamento = str(pedido_pronto.get("codigo_condicao_pagamento") or cliente["codigo_condicao_pagamento_padrao_omie"] or "")
+            numero_parcelas = to_int_or_none(pedido_pronto.get("numero_parcelas")) or cliente["numero_parcelas_padrao"] or 1
+            codigo_tabela_preco = str(pedido_pronto.get("codigo_tabela_preco") or cliente["codigo_tabela_preco_padrao"] or "5030")
+            ncod_tabela_preco = to_int_or_none(pedido_pronto.get("ncod_tabela_preco")) or cliente["ncod_tabela_preco_padrao"]
+
+            codigo_cenario_impostos = to_int_or_none(pedido_pronto.get("codigo_cenario_impostos")) or 10720457717
+            tipo_pedido = "bonificacao" if codigo_cenario_impostos == 10907366523 else "venda"
+            operacao_destino = pedido_pronto.get("operacao_destino") or "AUTO"
+
+            codigo_empresa_omie = to_int_or_none(pedido_pronto.get("codigo_empresa_omie")) or 10708535689
+            codigo_conta_corrente_omie = to_int_or_none(pedido_pronto.get("codigo_conta_corrente_omie")) or 10708538258
+            codigo_categoria_pedido = str(pedido_pronto.get("codigo_categoria_pedido") or "1.01.01")
+            etapa = str(pedido_pronto.get("etapa") or "10")
+            pedido_bloqueado = to_bool(pedido_pronto.get("pedido_bloqueado"))
+            codigo_pedido_integracao = str(pedido_pronto.get("codigo_pedido_integracao") or str(uuid.uuid4()))
+            data_emissao = parse_date_or_today(pedido_pronto.get("data_emissao"))
+            data_previsao_entrega = parse_date_or_today(pedido_pronto.get("data_previsao_entrega"))
+        else:
+            codigo_vendedor_omie = cliente["codigo_vendedor_padrao_omie"]
+            codigo_condicao_pagamento = cliente["codigo_condicao_pagamento_padrao_omie"]
+            numero_parcelas = cliente["numero_parcelas_padrao"] or 1
+            codigo_tabela_preco = cliente["codigo_tabela_preco_padrao"] or "5030"
+            ncod_tabela_preco = cliente["ncod_tabela_preco_padrao"]
+
+            tipo_pedido = (pedido_extraido.get("tipo_pedido") or "venda").lower().strip()
+            operacao_destino = pedido_extraido.get("operacao_destino") or "AUTO"
+
+            if tipo_pedido == "bonificacao":
+                codigo_cenario_impostos = 10907366523
+            else:
+                codigo_cenario_impostos = 10720457717
+
+            codigo_empresa_omie = 10708535689
+            codigo_conta_corrente_omie = 10708538258
+            codigo_categoria_pedido = "1.01.01"
+            etapa = "10"
+            pedido_bloqueado = False
+            codigo_pedido_integracao = str(uuid.uuid4())
+            data_emissao = date.today()
+            data_previsao_entrega = date.today()
+
         nome_vendedor_snapshot = buscar_vendedor_nome(cur, codigo_vendedor_omie) or cliente["nome_vendedor_padrao_snapshot"]
-
-        codigo_condicao_pagamento = cliente["codigo_condicao_pagamento_padrao_omie"]
         descricao_condicao_pagamento_snapshot = buscar_condicao_descricao(cur, codigo_condicao_pagamento) or cliente["prazo_pagamento_padrao_descricao"]
-        numero_parcelas = cliente["numero_parcelas_padrao"] or 1
-
-        codigo_tabela_preco = cliente["codigo_tabela_preco_padrao"] or "5030"
-        ncod_tabela_preco = cliente["ncod_tabela_preco_padrao"]
         nome_tabela_preco_snapshot = buscar_tabela_nome(cur, ncod_tabela_preco, codigo_tabela_preco) or cliente["nome_tabela_preco_padrao_snapshot"]
 
-        tipo_pedido = (pedido_extraido.get("tipo_pedido") or "venda").lower().strip()
-        operacao_destino = pedido_extraido.get("operacao_destino") or "AUTO"
-
         regra_fiscal = classificar_cenario_fiscal(uf_cliente_snapshot, tipo_pedido)
-        cfop_padrao = regra_fiscal["cfop"]
         cenario_fiscal_snapshot = regra_fiscal["cenario_fiscal"]
 
-        if tipo_pedido == "bonificacao":
-            codigo_cenario_impostos = 10907366523
-        else:
-            codigo_cenario_impostos = 10720457717
-
-        codigo_empresa_omie = 10708535689
-        codigo_conta_corrente_omie = 10708538258
-        codigo_categoria_pedido = "1.01.01"
-        etapa = "10"
-
-        codigo_local_estoque_omie = resolver_local_por_operacao(operacao_destino, uf_cliente_snapshot)
-        local_estoque_snapshot = buscar_nome_local(cur, codigo_local_estoque_omie)
+        codigo_local_estoque_padrao = resolver_local_por_operacao(operacao_destino, uf_cliente_snapshot)
+        local_estoque_padrao_snapshot = buscar_nome_local(cur, codigo_local_estoque_padrao)
 
         pedido_id = str(uuid.uuid4())
-        codigo_pedido_integracao = pedido_id
 
         itens_resolvidos: List[Dict[str, Any]] = []
         total_produtos = Decimal("0")
 
         for idx, item in enumerate(itens_entrada, start=1):
-            produto_texto = item.get("produto_texto") or ""
-            quantidade_raw = item.get("quantidade") or 0
-            unidade_raw = item.get("unidade") or "UN"
+            if modo_payload_pronto:
+                codigo_produto_omie_item = to_int_or_none(item.get("codigo_produto_omie"))
+                if not codigo_produto_omie_item:
+                    raise Exception(f"Item {idx} sem codigo_produto_omie.")
 
-            produto = buscar_produto_por_texto(cur, produto_texto)
-            if not produto:
-                raise Exception(f"Produto não encontrado a partir do texto: {produto_texto}")
+                produto = buscar_produto_por_codigo(cur, codigo_produto_omie_item)
+                if not produto:
+                    raise Exception(f"Produto não encontrado pelo código: {codigo_produto_omie_item}")
 
-            chave_produto = produto["chave"]
-            quantidade_final = converter_quantidade(chave_produto, quantidade_raw, unidade_raw)
-            preco_unitario = resolver_preco_unitario(codigo_tabela_preco, chave_produto)
+                quantidade_final = to_decimal(item.get("quantidade"))
+                valor_unitario = to_decimal(item.get("valor_unitario"))
+                percentual_desconto = to_decimal(item.get("percentual_desconto"))
+                valor_desconto_item = to_decimal(item.get("valor_desconto_item"))
+                valor_total_item = to_decimal(item.get("valor_total_item"))
+                valor_mercadoria = to_decimal(item.get("valor_mercadoria"))
 
-            validar_estoque(cur, produto["codigo_produto_omie"], codigo_local_estoque_omie, quantidade_final)
+                if valor_total_item == 0:
+                    valor_total_item = quantidade_final * valor_unitario
 
-            valor_total_item = quantidade_final * preco_unitario
-            total_produtos += valor_total_item
+                if valor_mercadoria == 0:
+                    valor_mercadoria = valor_total_item
 
-            itens_resolvidos.append({
-                "sequencia": idx,
-                "codigo_produto_omie": produto["codigo_produto_omie"],
-                "descricao_produto_snapshot": produto["descricao"],
-                "unidade": produto["unidade"] or EMBALAGEM_POR_CHAVE.get(chave_produto, "UN"),
-                "quantidade": quantidade_final,
-                "valor_unitario": preco_unitario,
-                "valor_total_item": valor_total_item,
-                "cfop": cfop_padrao,
-                "codigo_local_estoque_omie": codigo_local_estoque_omie,
-                "local_estoque_snapshot": local_estoque_snapshot,
-                "codigo_tabela_preco_item": ncod_tabela_preco or int(codigo_tabela_preco),
-                "tabela_preco_snapshot": nome_tabela_preco_snapshot,
-                "valor_desconto_item": Decimal("0"),
-                "valor_mercadoria": valor_total_item,
-                "codigo_categoria_item": codigo_categoria_pedido,
-                "codigo_cenario_impostos_item": codigo_cenario_impostos,
-                "payload_json": {
-                    "produto_texto_original": produto_texto,
-                    "unidade_original": unidade_raw,
-                    "quantidade_original": quantidade_raw,
-                    "codigo_produto_integracao": produto["codigo_produto_integracao"],
-                }
-            })
+                codigo_local_estoque_omie = to_int_or_none(item.get("codigo_local_estoque_omie")) or codigo_local_estoque_padrao
+                local_estoque_snapshot = buscar_nome_local(cur, codigo_local_estoque_omie) or local_estoque_padrao_snapshot
 
-        confirmado = bool(pedido_extraido.get("confirmado"))
-        status_integracao = "Pronto para envio" if confirmado else "Aguardando confirmação"
+                validar_estoque(cur, codigo_produto_omie_item, codigo_local_estoque_omie, quantidade_final)
+
+                total_produtos += valor_total_item
+
+                itens_resolvidos.append({
+                    "sequencia": idx,
+                    "codigo_produto_omie": codigo_produto_omie_item,
+                    "descricao_produto_snapshot": produto["descricao"],
+                    "unidade": item.get("unidade") or produto["unidade"] or "UN",
+                    "quantidade": quantidade_final,
+                    "valor_unitario": valor_unitario,
+                    "percentual_desconto": percentual_desconto,
+                    "valor_total_item": valor_total_item,
+                    "cfop": item.get("cfop") or regra_fiscal["cfop"],
+                    "codigo_local_estoque_omie": codigo_local_estoque_omie,
+                    "local_estoque_snapshot": local_estoque_snapshot,
+                    "codigo_tabela_preco_item": to_int_or_none(item.get("codigo_tabela_preco_item")) or ncod_tabela_preco or int(codigo_tabela_preco),
+                    "tabela_preco_snapshot": nome_tabela_preco_snapshot,
+                    "valor_desconto_item": valor_desconto_item,
+                    "valor_mercadoria": valor_mercadoria,
+                    "codigo_categoria_item": item.get("codigo_categoria_item") or codigo_categoria_pedido,
+                    "codigo_cenario_impostos_item": to_int_or_none(item.get("codigo_cenario_impostos_item")) or codigo_cenario_impostos,
+                    "payload_json": {
+                        "fonte": "payload_envio_omie",
+                        "item_original": item,
+                        "codigo_produto_integracao": produto["codigo_produto_integracao"],
+                    }
+                })
+            else:
+                produto_texto = item.get("produto_texto") or ""
+                quantidade_raw = item.get("quantidade") or 0
+                unidade_raw = item.get("unidade") or "UN"
+
+                produto = buscar_produto_por_texto(cur, produto_texto)
+                if not produto:
+                    raise Exception(f"Produto não encontrado a partir do texto: {produto_texto}")
+
+                chave_produto = produto["chave"]
+                quantidade_final = converter_quantidade(chave_produto, quantidade_raw, unidade_raw)
+                valor_unitario = resolver_preco_unitario(codigo_tabela_preco, chave_produto)
+
+                validar_estoque(cur, produto["codigo_produto_omie"], codigo_local_estoque_padrao, quantidade_final)
+
+                valor_total_item = quantidade_final * valor_unitario
+                total_produtos += valor_total_item
+
+                itens_resolvidos.append({
+                    "sequencia": idx,
+                    "codigo_produto_omie": produto["codigo_produto_omie"],
+                    "descricao_produto_snapshot": produto["descricao"],
+                    "unidade": produto["unidade"] or EMBALAGEM_POR_CHAVE.get(chave_produto, "UN"),
+                    "quantidade": quantidade_final,
+                    "valor_unitario": valor_unitario,
+                    "percentual_desconto": Decimal("0"),
+                    "valor_total_item": valor_total_item,
+                    "cfop": regra_fiscal["cfop"],
+                    "codigo_local_estoque_omie": codigo_local_estoque_padrao,
+                    "local_estoque_snapshot": local_estoque_padrao_snapshot,
+                    "codigo_tabela_preco_item": ncod_tabela_preco or int(codigo_tabela_preco),
+                    "tabela_preco_snapshot": nome_tabela_preco_snapshot,
+                    "valor_desconto_item": Decimal("0"),
+                    "valor_mercadoria": valor_total_item,
+                    "codigo_categoria_item": codigo_categoria_pedido,
+                    "codigo_cenario_impostos_item": codigo_cenario_impostos,
+                    "payload_json": {
+                        "produto_texto_original": produto_texto,
+                        "unidade_original": unidade_raw,
+                        "quantidade_original": quantidade_raw,
+                        "codigo_produto_integracao": produto["codigo_produto_integracao"],
+                    }
+                })
+
+        if modo_payload_pronto:
+            valor_produtos_pedido = to_decimal(pedido_pronto.get("valor_produtos"))
+            valor_desconto_pedido = to_decimal(pedido_pronto.get("valor_desconto"))
+            valor_total_pedido = to_decimal(pedido_pronto.get("valor_total"))
+
+            if valor_produtos_pedido == 0:
+                valor_produtos_pedido = total_produtos
+
+            if valor_total_pedido == 0:
+                valor_total_pedido = valor_produtos_pedido - valor_desconto_pedido
+
+            status_integracao = "Pronto para envio"
+            origem_pedido = pedido_pronto.get("origem_pedido") or "N8N"
+        else:
+            confirmado = bool(pedido_extraido.get("confirmado"))
+            status_integracao = "Pronto para envio" if confirmado else "Aguardando confirmação"
+            valor_produtos_pedido = total_produtos
+            valor_desconto_pedido = Decimal("0")
+            valor_total_pedido = total_produtos
+            origem_pedido = "API"
 
         cur.execute("""
             insert into omie_core.pedidos (
@@ -541,16 +712,16 @@ def compor_pedido(payload: Dict[str, Any]) -> Dict[str, Any]:
             codigo_condicao_pagamento,
             descricao_condicao_pagamento_snapshot,
             numero_parcelas,
-            date.today(),
-            date.today(),
-            total_produtos,
-            Decimal("0"),
-            total_produtos,
+            data_emissao,
+            data_previsao_entrega,
+            valor_produtos_pedido,
+            valor_desconto_pedido,
+            valor_total_pedido,
             None,
             etapa,
-            False,
+            pedido_bloqueado,
             Json({
-                "fonte": "n8n_ia",
+                "fonte": "payload_envio_omie" if modo_payload_pronto else "n8n_ia",
                 "entrada_original": payload,
             }),
             codigo_pedido_integracao,
@@ -560,7 +731,7 @@ def compor_pedido(payload: Dict[str, Any]) -> Dict[str, Any]:
             codigo_conta_corrente_omie,
             codigo_categoria_pedido,
             nome_fantasia_cliente_snapshot,
-            "API",
+            origem_pedido,
             len(itens_resolvidos),
             cidade_cliente_snapshot,
             uf_cliente_snapshot,
@@ -607,7 +778,7 @@ def compor_pedido(payload: Dict[str, Any]) -> Dict[str, Any]:
                 item["sequencia"],
                 item["quantidade"],
                 item["valor_unitario"],
-                Decimal("0"),
+                item["percentual_desconto"],
                 item["valor_total_item"],
                 Json(item["payload_json"]),
                 None,
@@ -638,6 +809,7 @@ def compor_pedido(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         return {
             "ok": True,
+            "modo": "payload_envio_omie" if modo_payload_pronto else "pedido_extraido",
             "pedido_id": pedido_id,
             "status_integracao": status_integracao,
             "codigo_cliente_omie": codigo_cliente_omie,
@@ -653,9 +825,9 @@ def compor_pedido(payload: Dict[str, Any]) -> Dict[str, Any]:
             "nome_vendedor_snapshot": nome_vendedor_snapshot,
             "codigo_cenario_impostos": codigo_cenario_impostos,
             "cenario_fiscal_snapshot": cenario_fiscal_snapshot,
-            "codigo_local_estoque_omie": codigo_local_estoque_omie,
-            "local_estoque_snapshot": local_estoque_snapshot,
-            "valor_total": decimal_to_float(total_produtos),
+            "codigo_local_estoque_omie_padrao": codigo_local_estoque_padrao,
+            "local_estoque_padrao_snapshot": local_estoque_padrao_snapshot,
+            "valor_total": decimal_to_float(valor_total_pedido),
             "itens": resumo_itens,
         }
 
