@@ -335,6 +335,7 @@ def main():
 
                 payload = montar_payload(pedido, itens)
                 retorno = enviar_para_omie(payload)
+                print(json.dumps(payload, indent=2, ensure_ascii=False, default=decimal_to_float))
 
                 codigo_pedido_omie_retorno, numero_pedido_retorno, etapa_retorno = extrair_retorno_omie(retorno)
 
