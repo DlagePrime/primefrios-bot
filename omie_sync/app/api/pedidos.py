@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Union
 
 from app.services.compor_pedido import compor_pedido
+from app.services.enviar_pedidos_omie import main as enviar_pedidos_omie
 
 
 router = APIRouter(prefix="/pedido", tags=["Pedidos"])
@@ -94,5 +95,13 @@ def compor_pedido_endpoint(payload: ComporPedidoRequest):
 
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+        
+@router.post("/enviar")
+def enviar_pedido_endpoint():
+    try:
+        enviar_pedidos_omie()
+        return {"ok": True, "mensagem": "Envio de pedidos executado com sucesso."}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
